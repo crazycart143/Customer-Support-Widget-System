@@ -15,7 +15,7 @@
         ShipBee Admin
       </h1>
     </div>
-    <nav class="flex gap-4">
+    <nav class="flex items-center gap-4">
       <a
         href="/admin"
         class="text-sm font-medium text-slate-600 hover:text-indigo-600 transition-colors"
