@@ -25,6 +25,7 @@
   let loading = false;
   let fileInput: HTMLInputElement;
   let uploadingFile = false;
+  let currentTicket: any = null;
 
   onMount(() => {
     // Generate or retrieve customer ID
@@ -72,6 +73,8 @@
     fetchHistory();
   }
 
+  let currentSubscription: any = null;
+
   async function fetchMessages(ticketId: string) {
     currentTicketId = ticketId;
     const { data } = await supabase
@@ -80,9 +83,24 @@
       .eq("ticket_id", ticketId)
       .order("created_at", { ascending: true });
     if (data) messages = data;
+    currentTicket = tickets.find((t) => t.id === ticketId);
 
-    // Subscribe
-    supabase
+    // Also fetch ticket again in case of status changes
+    if (!currentTicket) {
+      const { data: tData } = await supabase
+        .from("tickets")
+        .select("*")
+        .eq("id", ticketId)
+        .single();
+      if (tData) currentTicket = tData;
+    }
+
+    // Handle subscription
+    if (currentSubscription) {
+      supabase.removeChannel(currentSubscription);
+    }
+
+    currentSubscription = supabase
       .channel(`customer_ticket_${ticketId}`)
       .on(
         "postgres_changes",
@@ -92,9 +110,33 @@
           table: "messages",
           filter: `ticket_id=eq.${ticketId}`,
         },
-        (payload) => {
-          messages = [...messages, payload.new];
+        async (payload) => {
+          // Instead of just adding the new message, we refetch to get attachments
+          // if any were added. Realtime doesn't support joins content.
+          const { data: fullMsg } = await supabase
+            .from("messages")
+            .select("*, attachments(*)")
+            .eq("id", payload.new.id)
+            .single();
+
+          if (fullMsg) {
+            messages = [...messages, fullMsg];
+          } else {
+            messages = [...messages, payload.new];
+          }
           scrollToBottom();
+        },
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "tickets",
+          filter: `id=eq.${ticketId}`,
+        },
+        (payload) => {
+          currentTicket = payload.new;
         },
       )
       .subscribe();
@@ -171,9 +213,19 @@
         .from("tickets")
         .update({ updated_at: new Date() })
         .eq("id", currentTicketId);
-    } catch (error) {
+
+      // No need to manually refetch here if the subscription handles it,
+      // but the subscription might be slow, so let's refetch locally for better UX
+      const { data: updatedMessages } = await supabase
+        .from("messages")
+        .select("*, attachments(*)")
+        .eq("ticket_id", currentTicketId)
+        .order("created_at", { ascending: true });
+      if (updatedMessages) messages = updatedMessages;
+      scrollToBottom();
+    } catch (error: any) {
       console.error("Error uploading file:", error);
-      alert("Failed to upload file.");
+      alert(`Failed to upload file: ${error.message || "Unknown error"}`);
     } finally {
       uploadingFile = false;
     }
@@ -355,18 +407,30 @@
                   {msg.content}
 
                   {#if msg.attachments && msg.attachments.length > 0}
-                    <div class="mt-2 space-y-1">
+                    <div class="mt-2 space-y-2">
                       {#each msg.attachments as att}
-                        <a
-                          href={getPublicUrl(att.file_path)}
-                          target="_blank"
-                          class="flex items-center gap-2 bg-black/10 p-2 rounded-lg text-xs hover:bg-black/20 transition-colors"
-                        >
-                          <Paperclip class="w-3 h-3" />
-                          <span class="truncate max-w-[120px]"
-                            >{att.file_name}</span
+                        {#if att.content_type?.startsWith("image/")}
+                          <div
+                            class="rounded-lg overflow-hidden border border-black/5"
                           >
-                        </a>
+                            <img
+                              src={getPublicUrl(att.file_path)}
+                              alt={att.file_name}
+                              class="max-w-full h-auto block"
+                            />
+                          </div>
+                        {:else}
+                          <a
+                            href={getPublicUrl(att.file_path)}
+                            target="_blank"
+                            class="flex items-center gap-2 bg-black/10 p-2 rounded-lg text-xs hover:bg-black/20 transition-colors"
+                          >
+                            <Paperclip class="w-3 h-3" />
+                            <span class="truncate max-w-[120px]"
+                              >{att.file_name}</span
+                            >
+                          </a>
+                        {/if}
                       {/each}
                     </div>
                   {/if}
@@ -378,41 +442,51 @@
           <div
             class="absolute bottom-0 left-0 right-0 p-4 bg-white border-t border-slate-100"
           >
-            <form
-              on:submit|preventDefault={sendMessage}
-              class="flex items-center gap-2"
-            >
-              <input
-                type="file"
-                class="hidden"
-                bind:this={fileInput}
-                on:change={handleFileUpload}
-              />
-              <button
-                type="button"
-                on:click={() => fileInput.click()}
-                disabled={uploadingFile}
-                class="p-2 text-slate-400 hover:bg-slate-100 rounded-xl transition-colors disabled:opacity-50"
+            {#if currentTicket?.status === "resolved" || currentTicket?.status === "closed"}
+              <div class="text-center py-2 bg-slate-50 rounded-xl">
+                <p
+                  class="text-[10px] font-bold uppercase tracking-widest text-slate-400"
+                >
+                  This ticket is {currentTicket?.status} and cannot be replied to.
+                </p>
+              </div>
+            {:else}
+              <form
+                on:submit|preventDefault={sendMessage}
+                class="flex items-center gap-2"
               >
-                <Paperclip
-                  class={clsx("w-5 h-5", uploadingFile && "animate-pulse")}
+                <input
+                  type="file"
+                  class="hidden"
+                  bind:this={fileInput}
+                  on:change={handleFileUpload}
                 />
-              </button>
-              <input
-                type="text"
-                bind:value={newMessage}
-                placeholder={uploadingFile ? "Uploading..." : "Message..."}
-                disabled={uploadingFile}
-                class="flex-1 p-2.5 bg-slate-50 border-none rounded-xl focus:ring-0 focus:outline-none text-sm disabled:opacity-50"
-              />
-              <button
-                type="submit"
-                disabled={!newMessage.trim()}
-                class="p-2.5 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-colors disabled:opacity-50"
-              >
-                <Send class="w-5 h-5" />
-              </button>
-            </form>
+                <button
+                  type="button"
+                  on:click={() => fileInput.click()}
+                  disabled={uploadingFile}
+                  class="p-2 text-slate-400 hover:bg-slate-100 rounded-xl transition-colors disabled:opacity-50"
+                >
+                  <Paperclip
+                    class={clsx("w-5 h-5", uploadingFile && "animate-pulse")}
+                  />
+                </button>
+                <input
+                  type="text"
+                  bind:value={newMessage}
+                  placeholder={uploadingFile ? "Uploading..." : "Message..."}
+                  disabled={uploadingFile}
+                  class="flex-1 p-2.5 bg-slate-50 border-none rounded-xl focus:ring-0 focus:outline-none text-sm disabled:opacity-50"
+                />
+                <button
+                  type="submit"
+                  disabled={!newMessage.trim()}
+                  class="p-2.5 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-colors disabled:opacity-50"
+                >
+                  <Send class="w-5 h-5" />
+                </button>
+              </form>
+            {/if}
           </div>
         {/if}
       </div>

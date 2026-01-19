@@ -50,6 +50,17 @@ CREATE POLICY "Anyone can view messages" ON messages
 CREATE POLICY "Anyone can insert messages" ON messages
     FOR INSERT WITH CHECK (true);
 
+-- For attachments
+CREATE POLICY "Anyone can view attachments" ON attachments
+    FOR SELECT USING (true);
+
+CREATE POLICY "Anyone can insert attachments" ON attachments
+    FOR INSERT WITH CHECK (true);
+
+-- Update policy for tickets (needed for updated_at)
+CREATE POLICY "Anyone can update tickets" ON tickets
+    FOR UPDATE USING (true) WITH CHECK (true);
+
 -- 6. RPC: Close Ticket
 CREATE OR REPLACE FUNCTION close_ticket(ticket_id UUID)
 RETURNS VOID AS $$
